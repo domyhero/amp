@@ -32,9 +32,10 @@ class ProducerTraitTest extends TestCase {
             $value = 1;
 
             $promise = $this->producer->emit($value);
+            $iterator = $this->producer->iterate();
 
-            $this->assertTrue(yield $this->producer->advance());
-            $this->assertSame($value, $this->producer->getCurrent());
+            $this->assertTrue(yield $iterator->advance());
+            $this->assertSame($value, $iterator->getCurrent());
 
             $this->assertInstanceOf(Promise::class, $promise);
         });
@@ -49,9 +50,10 @@ class ProducerTraitTest extends TestCase {
             $promise = new Success($value);
 
             $promise = $this->producer->emit($promise);
+            $iterator = $this->producer->iterate();
 
-            $this->assertTrue(yield $this->producer->advance());
-            $this->assertSame($value, $this->producer->getCurrent());
+            $this->assertTrue(yield $iterator->advance());
+            $this->assertSame($value, $iterator->getCurrent());
 
             $this->assertInstanceOf(Promise::class, $promise);
         });
@@ -66,9 +68,10 @@ class ProducerTraitTest extends TestCase {
             $promise = new Failure($exception);
 
             $promise = $this->producer->emit($promise);
+            $iterator = $this->producer->iterate();
 
             try {
-                $this->assertTrue(yield $this->producer->advance());
+                $this->assertTrue(yield $iterator->advance());
                 $this->fail("The exception used to fail the iterator should be thrown from advance()");
             } catch (TestException $reason) {
                 $this->assertSame($reason, $exception);
@@ -87,11 +90,12 @@ class ProducerTraitTest extends TestCase {
             $deferred = new Deferred;
 
             $this->producer->emit($deferred->promise());
+            $iterator = $this->producer->iterate();
 
             $deferred->resolve($value);
 
-            $this->assertTrue(yield $this->producer->advance());
-            $this->assertSame($value, $this->producer->getCurrent());
+            $this->assertTrue(yield $iterator->advance());
+            $this->assertSame($value, $iterator->getCurrent());
         });
     }
 
@@ -104,9 +108,10 @@ class ProducerTraitTest extends TestCase {
             $promise = new FulfilledReactPromise($value);
 
             $this->producer->emit($promise);
+            $iterator = $this->producer->iterate();
 
-            $this->assertTrue(yield $this->producer->advance());
-            $this->assertSame($value, $this->producer->getCurrent());
+            $this->assertTrue(yield $iterator->advance());
+            $this->assertSame($value, $iterator->getCurrent());
         });
     }
 
@@ -116,18 +121,19 @@ class ProducerTraitTest extends TestCase {
     public function testEmitPendingPromiseThenNonPromise() {
         Loop::run(function () {
             $deferred = new Deferred;
+            $iterator = $this->producer->iterate();
 
             $this->producer->emit($deferred->promise());
 
             $this->producer->emit(2);
 
-            $this->assertTrue(yield $this->producer->advance());
-            $this->assertSame(2, $this->producer->getCurrent());
+            $this->assertTrue(yield $iterator->advance());
+            $this->assertSame(2, $iterator->getCurrent());
 
             $deferred->resolve(1);
 
-            $this->assertTrue(yield $this->producer->advance());
-            $this->assertSame(1, $this->producer->getCurrent());
+            $this->assertTrue(yield $iterator->advance());
+            $this->assertSame(1, $iterator->getCurrent());
         });
     }
 
@@ -147,7 +153,8 @@ class ProducerTraitTest extends TestCase {
      */
     public function testGetCurrentAfterComplete() {
         $this->producer->complete();
-        $this->producer->getCurrent();
+        $iterator = $this->producer->iterate();
+        $iterator->getCurrent();
     }
 
     /**
@@ -201,8 +208,9 @@ class ProducerTraitTest extends TestCase {
      * @expectedExceptionMessage The prior promise returned must resolve before invoking this method again
      */
     public function testDoubleAdvance() {
-        $this->producer->advance();
-        $this->producer->advance();
+        $iterator = $this->producer->iterate();
+        $iterator->advance();
+        $iterator->advance();
     }
 
     /**
@@ -210,7 +218,8 @@ class ProducerTraitTest extends TestCase {
      * @expectedExceptionMessage Promise returned from advance() must resolve before calling this method
      */
     public function testGetCurrentBeforeAdvance() {
-        $this->producer->getCurrent();
+        $iterator = $this->producer->iterate();
+        $iterator->getCurrent();
     }
 
     /**
@@ -220,5 +229,38 @@ class ProducerTraitTest extends TestCase {
     public function testDoubleComplete() {
         $this->producer->complete();
         $this->producer->complete();
+    }
+
+    public function testDestroyingIteratorRelievesBackPressure() {
+        $iterator = $this->producer->iterate();
+
+        $invoked = 0;
+        $onResolved = function () use (&$invoked) {
+            $invoked++;
+        };
+
+        foreach (\range(1, 5) as $value) {
+            $promise = $this->producer->emit($value);
+            $promise->onResolve($onResolved);
+        }
+
+        $this->assertSame(0, $invoked);
+
+        unset($iterator);
+
+        $this->assertSame(5, $invoked);
+    }
+
+    /**
+     * @depends testDestroyingIteratorRelievesBackPressure
+     * @expectedException \Amp\DisposedException
+     * @expectedExceptionMessage The iterator has been disposed
+     */
+    public function testEmitAfterDisposal() {
+        Loop::run(function () {
+            $iterator = $this->producer->iterate();
+            unset($iterator);
+            yield $this->producer->emit(1);
+        });
     }
 }

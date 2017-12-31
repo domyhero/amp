@@ -3,7 +3,11 @@
 namespace Amp;
 
 final class Producer implements Iterator {
-    use CallableMaker, Internal\Producer;
+    /** @var \Amp\Internal\Producer */
+    private $emitter;
+
+    /** @var \Amp\Iterator */
+    private $iterator;
 
     /**
      * @param callable(callable(mixed $value): Promise $emit): \Generator $producer
@@ -11,24 +15,52 @@ final class Producer implements Iterator {
      * @throws \Error Thrown if the callable does not return a Generator.
      */
     public function __construct(callable $producer) {
-        $result = $producer($this->callableFromInstanceMethod("emit"));
+        $this->emitter = $emitter = new class {
+            use Internal\Producer {
+                emit as public;
+                complete as public;
+                fail as public;
+            }
+        };
+
+        if (\PHP_VERSION_ID < 70100) {
+            $emit = static function ($value) use ($emitter): Promise {
+                return $emitter->emit($value);
+            };
+        } else {
+            $emit = \Closure::fromCallable([$this->emitter, "emit"]);
+        }
+
+        $result = $producer($emit);
 
         if (!$result instanceof \Generator) {
             throw new \Error("The callable did not return a Generator");
         }
 
         $coroutine = new Coroutine($result);
-        $coroutine->onResolve(function ($exception) {
-            if ($this->complete) {
-                return;
-            }
-
+        $coroutine->onResolve(static function ($exception) use ($emitter) {
             if ($exception) {
-                $this->fail($exception);
+                $emitter->fail($exception);
                 return;
             }
 
-            $this->complete();
+            $emitter->complete();
         });
+
+        $this->iterator = $this->emitter->iterate();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function advance(): Promise {
+        return $this->iterator->advance();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function getCurrent() {
+        return $this->iterator->getCurrent();
     }
 }
